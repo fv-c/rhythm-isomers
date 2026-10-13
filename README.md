@@ -2,7 +2,7 @@
 
 **Generate distinct rhythmic sequences with comparable structural complexity.**
 
-Rhythm Isomers is a Python command-line tool that generates multiple rhythmic patterns using a fixed set of permitted note durations. Each sequence has the **same total duration, number of onsets, and multiset of note values**, but a different temporal ordering. The results are exported as **MIDI**, **WAV** (synthetic claves / wooden sticks), and a **CSV** summary.
+Rhythm Isomers is a Python command-line tool that generates multiple rhythmic patterns using a fixed set of permitted note durations. Each sequence has the **same total duration, number of onsets, and multiset of note values**, but a different temporal ordering. The results are exported as **MIDI**, **WAV** (synthesized low frame-drum membrane / *pelle grave*), and a **CSV** summary.
 
 The generator uses exact rational arithmetic for musical time and a heuristic selection strategy to keep simple rhythmic-complexity indicators as close as possible across the generated examples.
 
@@ -11,6 +11,7 @@ The generator uses exact rational arithmetic for musical time and a heuristic se
 - Python 3.9 or newer
 - NumPy
 - Mido
+- SciPy
 
 Install:
 
@@ -19,6 +20,8 @@ git clone https://github.com/fv-c/rhythm-isomers.git
 cd rhythm-isomers
 python -m pip install -r requirements.txt
 ~~~
+
+The script retains its original filename, `genera_ritmi_legnetti.py`, for command-line compatibility even though the sound has changed.
 
 ## Quick start
 
@@ -76,11 +79,15 @@ ritmi/
 └── sequenze.csv
 ~~~
 
-- **MIDI:** 4/4 meter, explicit tempo, percussion channel 10 (zero-based channel 9), General MIDI note 75 (Claves).
-- **WAV:** mono, 44.1 kHz, 16-bit PCM. Each onset triggers a short, procedurally synthesized wooden-stick sound (inharmonic damped resonances and a noise transient). No external samples or SoundFonts are needed.
+- **MIDI:** 4/4 meter, explicit tempo, percussion channel 10 (zero-based channel 9), General MIDI note **41 (Low Floor Tom)**, the closest standard drum approximation.
+- **WAV:** mono, 44.1 kHz, 16-bit PCM. Each onset triggers the **Pelle grave** membrane synthesis (the first of the four timbre auditions). No samples or SoundFonts are needed.
 - **CSV:** one row per sequence containing the ordered rational durations and two complexity indicators.
 
-The WAV renderer and MIDI exporter are independent: the MIDI timbre is determined by the receiving synthesizer, whereas the WAV uses the built-in procedural sound.
+### Sound: Pelle grave (audition 01)
+
+The synthesized strike recreates the **first timbre preview**, a low skin drum **without jingles**. Its fundamental is around **119 Hz**, accompanied by five inharmonic decaying modes, a brief downward pitch sweep, filtered skin-impact noise and very subtle early reflections. Each event uses a fixed output gain (no per-sequence normalization); the WAV ends with an 8 ms fade to avoid a cutoff click.
+
+**MIDI is an approximation:** GM Low Floor Tom (note 41) will sound different depending on the playback instrument. The WAV is the reference rendering of the selected timbre.
 
 ## How complexity is controlled
 
@@ -100,7 +107,15 @@ The patterns contain only note attacks: no rests, pitches, dynamics, or expressi
 - Use the same seed and parameters to reproduce a run in the same Python environment.
 - With larger search spaces, candidate selection uses bounded enumeration and randomized sampling; it does not guarantee a global optimum.
 - Very fine rational divisions may exceed the allowed internal search or MIDI tick resolution and produce an explanatory error.
-- The synthetic claves sound is a procedural approximation, not a sampled acoustic recording.
+- The synthetic Pelle grave sound is a procedural approximation, not a sampled acoustic recording.
+
+## Tests
+
+~~~bash
+python -m unittest discover -s tests -v
+~~~
+
+Tests cover the deterministic low-drum synthesis, MIDI percussion note selection, and exact WAV duration.
 
 ## License
 

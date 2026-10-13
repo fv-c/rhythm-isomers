@@ -4,7 +4,7 @@
 Le durate sono espresse in frazioni di semibreve: in 4/4, 1 = una battuta,
 1/4 = una semiminima, 1/8 = una croma, 1/16 = una semicroma.
 
-Richiede: pip install numpy mido
+Richiede: pip install numpy mido scipy
 Esempio:
     python genera_ritmi_legnetti.py --n 10 --durata 2 --bpm 100 \
         --durate 1/4 1/8 1/16 --out ritmi --seed 42
@@ -15,12 +15,14 @@ import csv
 import math
 import random
 import wave
+from functools import lru_cache
 from collections import Counter, defaultdict
 from fractions import Fraction
 from pathlib import Path
 
 import mido
 import numpy as np
+from scipy.signal import butter, sosfilt
 
 
 def numero_permutazioni(conteggi, limite):
@@ -245,7 +247,7 @@ def scrivi_midi(sequenza, durata_totale, bpm, destinazione):
     midi = mido.MidiFile(type=0, ticks_per_beat=ppq)
     track = mido.MidiTrack()
     midi.tracks.append(track)
-    track.append(mido.MetaMessage("track_name", name="Legnetti", time=0))
+    track.append(mido.MetaMessage("track_name", name="Pelle grave", time=0))
     track.append(mido.MetaMessage("time_signature", numerator=4, denominator=4, time=0))
     track.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(bpm), time=0))
 
@@ -255,10 +257,12 @@ def scrivi_midi(sequenza, durata_totale, bpm, destinazione):
         inizio = int(4 * posizione * ppq)
         passo = int(4 * durata * ppq)
         fine = inizio + max(1, min(ppq // 10, passo // 2))
-        # Canale 10 (channel=9), nota GM 75: Claves (legnetti).
-        eventi.append((inizio, 1, mido.Message("note_on", channel=9, note=75,
+        # Canale 10 (channel=9), nota GM 41: Low Floor Tom.
+        # Il timbro MIDI dipende dal sintetizzatore e non coincide esattamente
+        # con la sintesi WAV della pelle grave.
+        eventi.append((inizio, 1, mido.Message("note_on", channel=9, note=41,
                                                  velocity=100, time=0)))
-        eventi.append((fine, 0, mido.Message("note_off", channel=9, note=75,
+        eventi.append((fine, 0, mido.Message("note_off", channel=9, note=41,
                                              velocity=0, time=0)))
         posizione += durata
 
@@ -272,22 +276,58 @@ def scrivi_midi(sequenza, durata_totale, bpm, destinazione):
     midi.save(destinazione)
 
 
-def colpo_di_legnetti(sample_rate, rng):
-    """Sintesi percussiva originale: risonanze inarmoniche + rumore d'attacco.
+@lru_cache(maxsize=4)
+def filtri_pelle_grave(sample_rate):
+    """Filtri del provino 01 (Pelle grave, senza sonagli) per un dato sample rate."""
+    lowpass = butter(3, 2650, 'lowpass', fs=sample_rate, output='sos')
+    midpass = butter(2, [420, 2750], 'bandpass', fs=sample_rate, output='sos')
+    return lowpass, midpass
 
-    È una simulazione timbrica (non una registrazione campionata di legnetti).
+
+def colpo_di_pelle_grave(sample_rate, rng):
+    """Sintesi del provino 01: membrana grave (119 Hz), senza sonagli.
+
+    Riproduce la formula del provino '01_pelle_grave.wav': cinque modi
+    inarmonici, lieve discesa iniziale di intonazione, rumori della pelle
+    e due riflessioni molto deboli. Il guadagno fisso (~0.66) approssima
+    il livello del provino senza normalizzare ogni sequenza separatamente.
     """
-    t = np.arange(round(0.13 * sample_rate)) / sample_rate
-    intonazione = rng.uniform(0.988, 1.012)
-    modi = (
-        0.90 * np.exp(-t / 0.028) * np.sin(2 * np.pi * 810 * intonazione * t)
-        + 0.55 * np.exp(-t / 0.019) * np.sin(2 * np.pi * 1370 * intonazione * t)
-        + 0.20 * np.exp(-t / 0.010) * np.sin(2 * np.pi * 2570 * intonazione * t)
+    n = int(round(0.46 * sample_rate))
+    t = np.arange(n, dtype=np.float64) / sample_rate
+    intonazione = rng.uniform(0.968, 1.030)
+
+    modi = np.zeros(n, dtype=np.float64)
+    for multiplo, ampiezza_relativa, fattore_decay, jitter in (
+        (1.00, 1.000, 1.00, 0.000),
+        (1.58, 0.480, 0.65, 0.012),
+        (2.13, 0.250, 0.44, -0.019),
+        (2.76, 0.135, 0.27, 0.025),
+        (3.69, 0.075, 0.18, -0.018),
+    ):
+        frequenza = 119.0 * multiplo * intonazione * (1 + jitter)
+        decadimento = 0.205 * fattore_decay
+        tau = 0.018 + 0.012 / multiplo
+        sweep = 0.22 / math.sqrt(multiplo)
+        fase = 2 * np.pi * frequenza * (t + sweep * tau * (1 - np.exp(-t / tau)))
+        ampiezza = ampiezza_relativa * (0.31 ** math.log2(multiplo))
+        modi += ampiezza * np.exp(-t / decadimento) * np.sin(fase)
+
+    attacco = 1 - np.exp(-t / 0.00115)
+    lowpass, midpass = filtri_pelle_grave(sample_rate)
+    rumore_grave = sosfilt(lowpass, rng.standard_normal(n))
+    rumore_pelle = sosfilt(midpass, rng.standard_normal(n))
+    corpo = (
+        0.72 * attacco * modi
+        + rumore_grave * (0.115 * np.exp(-t / 0.011) + 0.022 * np.exp(-t / 0.035))
+        + 0.24 * 0.16 * rumore_pelle * np.exp(-t / 0.018)
     )
-    rumore = rng.standard_normal(len(t))
-    rumore[1:] -= 0.8 * rumore[:-1].copy()  # transiente ricco di alte frequenze
-    attacco = 1 - np.exp(-t / 0.00035)
-    return 0.35 * attacco * (modi + 0.25 * np.exp(-t / 0.004) * rumore)
+
+    # Prime riflessioni, come nel provino; nessun sonaglio metallico.
+    for ritardo, guadagno in ((0.023, 0.55 * 0.045), (0.047, 0.30 * 0.045)):
+        campioni = int(round(ritardo * sample_rate))
+        corpo[campioni:] += guadagno * corpo[:-campioni].copy()
+
+    return 0.66 * corpo
 
 
 def scrivi_wav(sequenza, durata_totale, bpm, destinazione, seed, sample_rate=44_100):
@@ -300,13 +340,18 @@ def scrivi_wav(sequenza, durata_totale, bpm, destinazione, seed, sample_rate=44_
     posizione = Fraction(0)
     for durata in sequenza:
         inizio = round(float(posizione) * 4 * 60 / bpm * sample_rate)
-        colpo = colpo_di_legnetti(sample_rate, rng)
+        colpo = colpo_di_pelle_grave(sample_rate, rng)
         fine = min(campioni, inizio + len(colpo))
         if fine > inizio:
             audio[inizio:fine] += colpo[:fine - inizio]
         posizione += durata
 
-    # Un unico fattore di scala, senza compressione né normalizzazione variabile.
+    # Evita discontinuità alla fine del WAV senza prolungare la durata musicale.
+    campioni_fade = min(campioni, max(1, round(0.008 * sample_rate)))
+    if campioni_fade > 1:
+        audio[-campioni_fade:] *= np.linspace(1.0, 0.0, campioni_fade)
+
+    # Guadagno fisso e nessuna normalizzazione diversa per ciascuna sequenza.
     pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2")
     with wave.open(str(destinazione), "wb") as wav:
         wav.setnchannels(1)
