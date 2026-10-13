@@ -85,7 +85,7 @@ ritmi/
 
 ### Sound: Pelle grave (audition 01)
 
-The synthesized strike recreates the **first timbre preview**, a low skin drum **without jingles**. Its fundamental is around **119 Hz**, accompanied by five inharmonic decaying modes, a brief downward pitch sweep, filtered skin-impact noise and very subtle early reflections. Each event uses a fixed output gain (no per-sequence normalization); the WAV ends with an 8 ms fade to avoid a cutoff click.
+The synthesized strike recreates the **first timbre preview**, a low skin drum **without jingles**. Its fundamental is around **119 Hz**, accompanied by five inharmonic decaying modes, a brief downward pitch sweep, filtered skin-impact noise and very subtle early reflections. Each event uses a fixed output gain (no per-sequence normalization) and a smooth 20 ms cosine fade at the end of its 0.46-second decay to prevent a cutoff click. The WAV also ends with an 8 ms cosine fade when the musical duration cuts a strike short; both fades preserve the requested duration.
 
 **MIDI is an approximation:** GM Low Floor Tom (note 41) will sound different depending on the playback instrument. The WAV is the reference rendering of the selected timbre.
 
@@ -115,7 +115,7 @@ The patterns contain only note attacks: no rests, pitches, dynamics, or expressi
 python -m unittest discover -s tests -v
 ~~~
 
-Tests cover the deterministic low-drum synthesis, MIDI percussion note selection, and exact WAV duration.
+Tests cover the deterministic low-drum synthesis, smooth strike endings at multiple sample rates, MIDI percussion note selection, exact WAV duration, and release of strikes truncated by the file boundary.
 
 ## License
 

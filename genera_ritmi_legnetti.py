@@ -284,6 +284,16 @@ def filtri_pelle_grave(sample_rate):
     return lowpass, midpass
 
 
+def sfuma_coda(audio, sample_rate, durata=0.020):
+    """Porta la coda a zero in-place con una curva a coseno e pendenza nulla."""
+    campioni = min(len(audio), max(1, round(durata * sample_rate)))
+    if campioni == 1:
+        audio[-1] = 0.0
+    elif campioni > 1:
+        fase = np.linspace(0.0, np.pi, campioni)
+        audio[-campioni:] *= 0.5 * (1.0 + np.cos(fase))
+
+
 def colpo_di_pelle_grave(sample_rate, rng):
     """Sintesi del provino 01: membrana grave (119 Hz), senza sonagli.
 
@@ -327,6 +337,9 @@ def colpo_di_pelle_grave(sample_rate, rng):
         campioni = int(round(ritardo * sample_rate))
         corpo[campioni:] += guadagno * corpo[:-campioni].copy()
 
+    # Il decadimento esponenziale conserva energia a 0.46 s: chiudi ogni
+    # colpo dopo le riflessioni per evitare un salto al silenzio nel mix.
+    sfuma_coda(corpo, sample_rate)
     return 0.66 * corpo
 
 
@@ -347,9 +360,7 @@ def scrivi_wav(sequenza, durata_totale, bpm, destinazione, seed, sample_rate=44_
         posizione += durata
 
     # Evita discontinuità alla fine del WAV senza prolungare la durata musicale.
-    campioni_fade = min(campioni, max(1, round(0.008 * sample_rate)))
-    if campioni_fade > 1:
-        audio[-campioni_fade:] *= np.linspace(1.0, 0.0, campioni_fade)
+    sfuma_coda(audio, sample_rate, durata=0.008)
 
     # Guadagno fisso e nessuna normalizzazione diversa per ciascuna sequenza.
     pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2")
