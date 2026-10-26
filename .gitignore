@@ -1,5 +1,8 @@
 .DS_Store
 
+# Generated auditions
+provini/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

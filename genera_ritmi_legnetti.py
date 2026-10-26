@@ -4,7 +4,7 @@
 Le durate sono espresse in frazioni di semibreve: in 4/4, 1 = una battuta,
 1/4 = una semiminima, 1/8 = una croma, 1/16 = una semicroma.
 
-Richiede: pip install numpy mido scipy
+Installazione: pip install -r requirements.txt
 Esempio:
     python genera_ritmi_legnetti.py --n 10 --durata 2 --bpm 100 \
         --durate 1/4 1/8 1/16 --out ritmi --seed 42
@@ -14,6 +14,7 @@ import argparse
 import csv
 import math
 import random
+import sys
 import wave
 from functools import lru_cache
 from collections import Counter, defaultdict
@@ -22,7 +23,11 @@ from pathlib import Path
 
 import mido
 import numpy as np
-from scipy.signal import butter, sosfilt
+from scipy.io import wavfile
+from scipy.signal import resample_poly
+
+
+DEFAULT_SAMPLE = Path(__file__).resolve().parent / "samples" / "claves.wav"
 
 
 def numero_permutazioni(conteggi, limite):
@@ -238,7 +243,9 @@ def genera_sequenze(n, durata_totale, durate, seed):
     return scelti
 
 
-def scrivi_midi(sequenza, durata_totale, bpm, destinazione):
+def scrivi_midi(sequenza, durata_totale, bpm, destinazione, nota_midi=75):
+    if not 35 <= nota_midi <= 81:
+        raise ValueError("La nota della percussione GM deve essere fra 35 e 81.")
     # Risoluzione MIDI sufficiente anche per suddivisioni irregolari.
     ppq = math.lcm(960, *((4 * d).denominator for d in sequenza))
     if ppq > 32_767:
@@ -247,9 +254,10 @@ def scrivi_midi(sequenza, durata_totale, bpm, destinazione):
     midi = mido.MidiFile(type=0, ticks_per_beat=ppq)
     track = mido.MidiTrack()
     midi.tracks.append(track)
-    track.append(mido.MetaMessage("track_name", name="Pelle grave", time=0))
+    track.append(mido.MetaMessage("track_name", name=f"GM percussion {nota_midi}", time=0))
     track.append(mido.MetaMessage("time_signature", numerator=4, denominator=4, time=0))
     track.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(bpm), time=0))
+    track.append(mido.Message("program_change", channel=9, program=0, time=0))
 
     eventi = []
     posizione = Fraction(0)
@@ -257,12 +265,10 @@ def scrivi_midi(sequenza, durata_totale, bpm, destinazione):
         inizio = int(4 * posizione * ppq)
         passo = int(4 * durata * ppq)
         fine = inizio + max(1, min(ppq // 10, passo // 2))
-        # Canale 10 (channel=9), nota GM 41: Low Floor Tom.
-        # Il timbro MIDI dipende dal sintetizzatore e non coincide esattamente
-        # con la sintesi WAV della pelle grave.
-        eventi.append((inizio, 1, mido.Message("note_on", channel=9, note=41,
+        # Canale 10 (channel=9); 75 = Claves, 41 = Low Floor Tom.
+        eventi.append((inizio, 1, mido.Message("note_on", channel=9, note=nota_midi,
                                                  velocity=100, time=0)))
-        eventi.append((fine, 0, mido.Message("note_off", channel=9, note=41,
+        eventi.append((fine, 0, mido.Message("note_off", channel=9, note=nota_midi,
                                              velocity=0, time=0)))
         posizione += durata
 
@@ -276,14 +282,6 @@ def scrivi_midi(sequenza, durata_totale, bpm, destinazione):
     midi.save(destinazione)
 
 
-@lru_cache(maxsize=4)
-def filtri_pelle_grave(sample_rate):
-    """Filtri del provino 01 (Pelle grave, senza sonagli) per un dato sample rate."""
-    lowpass = butter(3, 2650, 'lowpass', fs=sample_rate, output='sos')
-    midpass = butter(2, [420, 2750], 'bandpass', fs=sample_rate, output='sos')
-    return lowpass, midpass
-
-
 def sfuma_coda(audio, sample_rate, durata=0.020):
     """Porta la coda a zero in-place con una curva a coseno e pendenza nulla."""
     campioni = min(len(audio), max(1, round(durata * sample_rate)))
@@ -294,75 +292,79 @@ def sfuma_coda(audio, sample_rate, durata=0.020):
         audio[-campioni:] *= 0.5 * (1.0 + np.cos(fase))
 
 
-def colpo_di_pelle_grave(sample_rate, rng):
-    """Sintesi del provino 01: membrana grave (119 Hz), senza sonagli.
+@lru_cache(maxsize=8)
+def carica_sample(sample, sample_rate=44_100):
+    """Carica un colpo WAV mono/stereo e converte il sample rate senza reintonarlo."""
+    path = Path(sample).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(
+            f"Sample non trovato: {path}. Ripristinare la cartella samples "
+            "oppure specificare --sample con un colpo WAV."
+        )
+    try:
+        rate_originale, dati = wavfile.read(str(path))
+    except (ValueError, EOFError) as errore:
+        raise ValueError(f"Sample WAV non valido: {path}: {errore}") from errore
+    if not dati.size or dati.ndim not in (1, 2):
+        raise ValueError("Il sample WAV deve contenere audio mono o stereo.")
+    if dati.ndim == 2 and dati.shape[1] != 2:
+        raise ValueError("Il sample WAV deve contenere audio mono o stereo.")
+    if sample_rate <= 0 or rate_originale <= 0:
+        raise ValueError("Il sample rate deve essere positivo.")
 
-    Riproduce la formula del provino '01_pelle_grave.wav': cinque modi
-    inarmonici, lieve discesa iniziale di intonazione, rumori della pelle
-    e due riflessioni molto deboli. Il guadagno fisso (~0.66) approssima
-    il livello del provino senza normalizzare ogni sequenza separatamente.
-    """
-    n = int(round(0.46 * sample_rate))
-    t = np.arange(n, dtype=np.float64) / sample_rate
-    intonazione = rng.uniform(0.968, 1.030)
+    colpo = dati.astype(np.float64)
+    if dati.dtype.kind == "u":
+        centro = 2 ** (8 * dati.dtype.itemsize - 1)
+        colpo = (colpo - centro) / centro
+    elif dati.dtype.kind == "i":
+        # SciPy restituisce il PCM 24-bit allineato a sinistra in int32.
+        colpo /= 2 ** (8 * dati.dtype.itemsize - 1)
+    elif dati.dtype.kind != "f":
+        raise ValueError("Formato WAV non supportato: usare PCM o floating point.")
+    if not np.all(np.isfinite(colpo)):
+        raise ValueError("Il sample WAV contiene valori NaN o infiniti.")
+    if dati.ndim == 2:
+        colpo = colpo.mean(axis=1)
+    if np.max(np.abs(colpo)) < 1e-12:
+        raise ValueError("Il sample WAV è silenzioso dopo la conversione mono.")
 
-    modi = np.zeros(n, dtype=np.float64)
-    for multiplo, ampiezza_relativa, fattore_decay, jitter in (
-        (1.00, 1.000, 1.00, 0.000),
-        (1.58, 0.480, 0.65, 0.012),
-        (2.13, 0.250, 0.44, -0.019),
-        (2.76, 0.135, 0.27, 0.025),
-        (3.69, 0.075, 0.18, -0.018),
-    ):
-        frequenza = 119.0 * multiplo * intonazione * (1 + jitter)
-        decadimento = 0.205 * fattore_decay
-        tau = 0.018 + 0.012 / multiplo
-        sweep = 0.22 / math.sqrt(multiplo)
-        fase = 2 * np.pi * frequenza * (t + sweep * tau * (1 - np.exp(-t / tau)))
-        ampiezza = ampiezza_relativa * (0.31 ** math.log2(multiplo))
-        modi += ampiezza * np.exp(-t / decadimento) * np.sin(fase)
-
-    attacco = 1 - np.exp(-t / 0.00115)
-    lowpass, midpass = filtri_pelle_grave(sample_rate)
-    rumore_grave = sosfilt(lowpass, rng.standard_normal(n))
-    rumore_pelle = sosfilt(midpass, rng.standard_normal(n))
-    corpo = (
-        0.72 * attacco * modi
-        + rumore_grave * (0.115 * np.exp(-t / 0.011) + 0.022 * np.exp(-t / 0.035))
-        + 0.24 * 0.16 * rumore_pelle * np.exp(-t / 0.018)
-    )
-
-    # Prime riflessioni, come nel provino; nessun sonaglio metallico.
-    for ritardo, guadagno in ((0.023, 0.55 * 0.045), (0.047, 0.30 * 0.045)):
-        campioni = int(round(ritardo * sample_rate))
-        corpo[campioni:] += guadagno * corpo[:-campioni].copy()
-
-    # Il decadimento esponenziale conserva energia a 0.46 s: chiudi ogni
-    # colpo dopo le riflessioni per evitare un salto al silenzio nel mix.
-    sfuma_coda(corpo, sample_rate)
-    return 0.66 * corpo
+    if rate_originale != sample_rate:
+        divisore = math.gcd(rate_originale, sample_rate)
+        lunghezza = round(len(colpo) * sample_rate / rate_originale)
+        colpo = resample_poly(colpo, sample_rate // divisore,
+                              rate_originale // divisore)[:lunghezza]
+    if not len(colpo):
+        raise ValueError("Il sample WAV è troppo corto per il sample rate richiesto.")
+    sfuma_coda(colpo, sample_rate)
+    colpo.setflags(write=False)
+    return colpo
 
 
-def scrivi_wav(sequenza, durata_totale, bpm, destinazione, seed, sample_rate=44_100):
+def scrivi_wav(sequenza, durata_totale, bpm, destinazione, seed=None,
+               sample_rate=44_100, sample=DEFAULT_SAMPLE, gain=1.0):
+    # seed è mantenuto per compatibilità; i campioni non vengono randomizzati.
+    if not math.isfinite(gain) or gain <= 0:
+        raise ValueError("--gain deve essere un numero finito > 0.")
+    colpo = carica_sample(str(Path(sample).expanduser().resolve()), sample_rate)
     # Quattro semiminime per semibreve: durata in secondi = 4 * 60 / BPM.
     durata_secondi = float(durata_totale) * 4 * 60 / bpm
     campioni = round(durata_secondi * sample_rate)
     audio = np.zeros(campioni, dtype=np.float64)
-    rng = np.random.default_rng(seed)
 
     posizione = Fraction(0)
     for durata in sequenza:
         inizio = round(float(posizione) * 4 * 60 / bpm * sample_rate)
-        colpo = colpo_di_pelle_grave(sample_rate, rng)
         fine = min(campioni, inizio + len(colpo))
         if fine > inizio:
-            audio[inizio:fine] += colpo[:fine - inizio]
+            audio[inizio:fine] += gain * colpo[:fine - inizio]
         posizione += durata
 
     # Evita discontinuità alla fine del WAV senza prolungare la durata musicale.
     sfuma_coda(audio, sample_rate, durata=0.008)
 
     # Guadagno fisso e nessuna normalizzazione diversa per ciascuna sequenza.
+    if np.max(np.abs(audio), initial=0) > 1:
+        raise ValueError("Il mix supera 0 dBFS: ridurre --gain per evitare distorsione.")
     pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2")
     with wave.open(str(destinazione), "wb") as wav:
         wav.setnchannels(1)
@@ -372,6 +374,10 @@ def scrivi_wav(sequenza, durata_totale, bpm, destinazione, seed, sample_rate=44_
 
 
 def main():
+    # I terminali Windows usano Unicode; le pipe possono usare ancora una
+    # code page locale. Un percorso Unicode non deve interrompere l'export.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="backslashreplace")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n", type=int, required=True, help="Numero di sequenze")
     parser.add_argument("--durata", type=Fraction, required=True,
@@ -383,28 +389,42 @@ def main():
                         help="Cartella di destinazione")
     parser.add_argument("--seed", type=int, default=42,
                         help="Seme per ottenere sempre gli stessi risultati")
+    parser.add_argument("--sample", type=Path, default=DEFAULT_SAMPLE,
+                        help="Colpo WAV mono/stereo (default: claves di SamuelGremaud, Freesound)")
+    parser.add_argument("--gain", type=float, default=1.0,
+                        help="Guadagno fisso del campione, senza normalizzazione (default: 1.0)")
+    parser.add_argument("--nota-midi", type=int, default=75,
+                        help="Nota GM 35–81 solo nel MIDI; il WAV usa sempre --sample")
     args = parser.parse_args()
 
     if not 0 < args.bpm <= 1000:
         parser.error("--bpm deve essere > 0 e <= 1000")
     if args.n < 1:
         parser.error("--n deve essere >= 1")
+    if not 35 <= args.nota_midi <= 81:
+        parser.error("--nota-midi deve essere fra 35 e 81")
+    if not math.isfinite(args.gain) or args.gain <= 0:
+        parser.error("--gain deve essere un numero finito > 0")
 
     try:
         sequenze = genera_sequenze(args.n, args.durata, args.durate, args.seed)
+        # Verifica il campione prima di creare file di uscita parziali.
+        carica_sample(str(args.sample.expanduser().resolve()), 44_100)
         args.out.mkdir(parents=True, exist_ok=True)
         with (args.out / "sequenze.csv").open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["sequenza", "durate", "attacchi_fuori_quarto", "cambi_durata"])
             for i, seq in enumerate(sequenze, start=1):
                 base = args.out / f"sequenza_{i:03d}"
-                scrivi_midi(seq, args.durata, args.bpm, base.with_suffix(".mid"))
+                scrivi_midi(seq, args.durata, args.bpm, base.with_suffix(".mid"),
+                            nota_midi=args.nota_midi)
                 scrivi_wav(seq, args.durata, args.bpm,
-                           base.with_suffix(".wav"), seed=args.seed + i)
+                           base.with_suffix(".wav"), seed=args.seed + i,
+                           sample=args.sample, gain=args.gain)
                 indicatori = complessita(seq)
                 writer.writerow([i, " ".join(str(d) for d in seq), *indicatori])
                 print(f"{base.name}: {' '.join(map(str, seq))}  | complessità={indicatori}")
-    except (ValueError, RuntimeError) as errore:
+    except (OSError, ValueError, RuntimeError) as errore:
         parser.error(str(errore))
 
     print(f"\nCreati {args.n} MIDI + {args.n} WAV + sequenze.csv in {args.out.resolve()}")

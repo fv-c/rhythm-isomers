@@ -1,0 +1,24 @@
+[
+  {
+    "file": "claves.wav",
+    "title": "CLAVES",
+    "creator": "SamuelGremaud",
+    "freesound_id": 517609,
+    "source_page": "https://freesound.org/people/SamuelGremaud/sounds/517609/",
+    "download_url": "https://cdn.freesound.org/previews/517/517609_8031303-hq.mp3",
+    "source_format": "Public Freesound high-quality MP3 preview; not the original lossless file",
+    "source_notes": "Original WAV: 48000 Hz / 24-bit stereo. Wooden claves recorded with a Zoom H4N Pro. First strike extracted.",
+    "downloaded": "2026-10-26",
+    "license": "CC0-1.0",
+    "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "source_sha256": "cc15ae3da0309f47204d6cfdd28448e2410ce24e213bc7fe076822038088889a",
+    "sha256": "435c1d36d53941db115348434824fa258d740142062db520be361ebf79331370",
+    "sample_rate": 44100,
+    "channels": 1,
+    "frames": 17387,
+    "decoded_source_start_frame": 22303,
+    "decoded_source_end_frame": 39690,
+    "preparation_gain": 0.5,
+    "processing": "FFmpeg decode to mono 44100 Hz float32; extract specified frame range; fixed 0.5 gain to prevent MP3 overshoot clipping; quantize to PCM16 (multiply by 32767 and truncate). No normalization, EQ, denoising, pitch shift or time stretching added."
+  }
+]
